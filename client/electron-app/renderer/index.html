@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Taskman-Int Overlay</title>
+    <style>
+      body { margin: 0; font-family: Arial, sans-serif; background: rgba(0,0,0,0); }
+      #overlay { background: rgba(20,20,20,0.6); color: #0f0; padding: 12px; border-radius: 8px; }
+      #controls { margin-top: 8px; }
+      button { margin-right: 6px; }
+      #captions { font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <div id="overlay">
+      <div id="status">Status: Ready</div>
+      <div id="captions">No captions yet.</div>
+      <div id="controls">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn">Stop</button>
+        <input id="resumeUpload" type="file" />
+      </div>
+    </div>
+    <script src="renderer.js"></script>
+  </body>
+</html>

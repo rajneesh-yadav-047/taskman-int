@@ -1,0 +1,15 @@
+{
+  "name": "taskman-int-client",
+  "version": "0.1.0",
+  "description": "Electron client for ethical real-time assistant (overlay + captions)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^26.0.0"
+  }
+}
