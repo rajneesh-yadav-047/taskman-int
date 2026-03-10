@@ -26,6 +26,7 @@
 #include "audio_playback.h"
 #include "config.h" // For GEMINI_API_KEY
 #include "gemini_live_client.h"
+#include "http_client.h"
 #include "app_messages.h"
 
 using namespace Gdiplus;
@@ -129,6 +130,56 @@ void LogEvent(const std::string &msg) {
         g_logFile << ss.str();
         g_logFile.flush();
     }
+}
+
+std::string SendPromptToGemini(const std::string& prompt) {
+    if (GEMINI_API_KEY.empty() || GEMINI_API_KEY == "PASTE_YOUR_GEMINI_API_KEY_HERE") {
+        LogEvent("Error: GEMINI_API_KEY is not set in src/config.h");
+        return "{\"error\": \"GEMINI_API_KEY is not set in src/config.h\"}";
+    }
+    std::string url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
+    if (GEMINI_API_KEY.rfind("AIza", 0) == 0) {
+        url += "?key=" + GEMINI_API_KEY;
+    }
+    
+    std::string escaped_prompt = prompt;
+    size_t pos = 0;
+    while ((pos = escaped_prompt.find('\\', pos)) != std::string::npos) { escaped_prompt.replace(pos, 1, "\\\\"); pos += 2; }
+    pos = 0;
+    while ((pos = escaped_prompt.find('"', pos)) != std::string::npos) { escaped_prompt.replace(pos, 1, "\\\""); pos += 2; }
+
+    std::string json_body = "{\"contents\": [{\"parts\": [{\"text\": \"" + escaped_prompt + "\"}]}]}";
+    LogEvent("Sending direct HTTP request to Gemini API.");
+    try {
+        return http_post_json(url, json_body);
+    } catch (const std::exception& e) {
+        LogEvent(std::string("Direct API call failed: ") + e.what());
+        return std::string("{\"error\": \"API call failed: ") + e.what() + "\"}";
+    }
+}
+
+std::string ParseAnswer(const std::string& resp) {
+    size_t candidates_pos = resp.find("\"candidates\"");
+    if (candidates_pos != std::string::npos) {
+        size_t text_pos = resp.find("\"text\"", candidates_pos);
+        if (text_pos != std::string::npos) {
+            size_t colon = resp.find(':', text_pos);
+            if (colon != std::string::npos) {
+                size_t first_quote = resp.find('"', colon);
+                if (first_quote != std::string::npos) {
+                    size_t second_quote = resp.find('"', first_quote + 1);
+                    if (second_quote != std::string::npos) {
+                        std::string answer = resp.substr(first_quote + 1, second_quote - first_quote - 1);
+                        for (size_t p = 0; (p = answer.find("\\n", p)) != std::string::npos; ++p) { answer.replace(p, 2, "\r\n"); }
+                        for (size_t p = 0; (p = answer.find("\\\"", p)) != std::string::npos; ++p) { answer.replace(p, 2, "\""); }
+                        for (size_t p = 0; (p = answer.find("\\\\", p)) != std::string::npos; ++p) { answer.replace(p, 2, "\\"); }
+                        return answer;
+                    }
+                }
+            }
+        }
+    }
+    return resp; // Fallback
 }
 
 void UpdateLiveTranscript(const std::wstring& text, bool isUser, bool isFinal) {
@@ -235,13 +286,31 @@ void SubmitPromptToLLM(const std::string& prompt, HWND hwnd) {
     // Send the text prompt over the live WebSocket connection if it's active.
     if (g_isListening) {
         g_liveClient.SendTextPrompt(prompt);
-        currentText = L"Status: Listening..."; // Return to listening status
+        currentText = L"Status: Listening...";
+        InvalidateRect(hwnd, NULL, TRUE);
     } else {
-        // If not listening, we can't send the prompt.
-        AddConversation(L"[system] Error: Must be listening to send a text prompt.");
-        currentText = L"Status: Ready. Press F3 to listen.";
+        // Path for non-listening state: use HTTP
+        currentText = L"Status: Thinking...";
+        InvalidateRect(hwnd, NULL, TRUE);
+        std::thread([prompt]() {
+            try {
+                std::string resp = SendPromptToGemini(prompt);
+                std::string answer = ParseAnswer(resp);
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, answer.c_str(), -1, NULL, 0);
+                if (wlen > 0) {
+                    wchar_t* wout = new wchar_t[wlen];
+                    MultiByteToWideChar(CP_UTF8, 0, answer.c_str(), -1, wout, wlen);
+                    if (hGlobalWnd) {
+                        PostMessageW(hGlobalWnd, WM_APP + 1, 0, reinterpret_cast<LPARAM>(wout));
+                    } else {
+                        delete[] wout;
+                    }
+                }
+            } catch (...) {
+                LogEvent("Unknown error in HTTP prompt thread.");
+            }
+        }).detach();
     }
-    InvalidateRect(hwnd, NULL, TRUE);
 }
 
 void ToggleListening(HWND hwnd) {
@@ -456,6 +525,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     
+    case WM_APP + 1: { // HTTP Response from non-listening text prompt
+        wchar_t* txt = reinterpret_cast<wchar_t*>(lParam);
+        if (txt) {
+            std::wstring resp(txt);
+            AddConversation(std::wstring(L"Agent: ") + resp);
+            currentText = L"Status: Ready.";
+            InvalidateRect(hwnd, NULL, TRUE);
+            delete[] txt;
+        }
+        return 0;
+    }
+
     case WM_APP_USER_TRANSCRIPT: { // User transcript update
         wchar_t* txt = reinterpret_cast<wchar_t*>(lParam);
         bool is_final = (bool)wParam;

@@ -26,7 +26,8 @@ private:
     volatile bool running_ = false;
     HANDLE recvThread_ = NULL;
     AudioPlayback* audioPlayer_ = nullptr;
-    std::vector<char> dec_buffer_; // Buffer for decrypted data
+    std::vector<char> m_enc_buffer; // Buffer for encrypted data from socket
+    std::vector<char> m_dec_buffer; // Buffer for decrypted data to be consumed
 
     // SChannel members
     CredHandle hCred_{};

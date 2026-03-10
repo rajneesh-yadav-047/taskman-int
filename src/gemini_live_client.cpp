@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include "gemini_live_client.h"
 #include <wincrypt.h>
+#include "logger.h"
 #include "app_messages.h"
 #include <string>
 #include <vector>
@@ -90,7 +91,10 @@ bool GeminiLiveClient::DoTlsHandshake(const std::string& host) {
     
     TimeStamp expiry;
     SECURITY_STATUS status = AcquireCredentialsHandleA(NULL, (LPSTR)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &cred, NULL, NULL, &hCred_, &expiry);
-    if (status != SEC_E_OK) return false;
+    if (status != SEC_E_OK) {
+        LogEvent("TLS: AcquireCredentialsHandleA failed with status " + std::to_string(status));
+        return false;
+    }
 
     SecBuffer outBuf;
     outBuf.pvBuffer = NULL;
@@ -108,10 +112,15 @@ bool GeminiLiveClient::DoTlsHandshake(const std::string& host) {
 
     status = InitializeSecurityContextA(&hCred_, NULL, (SEC_CHAR*)host.c_str(), dwSSPIFlags, 0, SECURITY_NATIVE_DREP, NULL, 0, &hCtxt_, &outBufDesc, &dwSSPIFlags, &expiry);
 
-    if (status != SEC_I_CONTINUE_NEEDED) return false;
+    if (status != SEC_I_CONTINUE_NEEDED) {
+        LogEvent("TLS: Initial InitializeSecurityContextA failed with status " + std::to_string(status));
+        return false;
+    }
 
     if (outBuf.cbBuffer != 0 && outBuf.pvBuffer != NULL) {
+        LogEvent("TLS: Sending initial token to server (" + std::to_string(outBuf.cbBuffer) + " bytes)");
         if (send(sock_, (char*)outBuf.pvBuffer, outBuf.cbBuffer, 0) == SOCKET_ERROR) {
+            LogEvent("TLS: send() failed with error " + std::to_string(WSAGetLastError()));
             FreeContextBuffer(outBuf.pvBuffer);
             return false;
         }
@@ -123,8 +132,12 @@ bool GeminiLiveClient::DoTlsHandshake(const std::string& host) {
 
     while (status == SEC_I_CONTINUE_NEEDED) {
         int bytes = recv(sock_, read_buf.data() + read_total, (int)(read_buf.size() - read_total), 0);
-        if (bytes <= 0) return false;
+        if (bytes <= 0) {
+            LogEvent("TLS: recv() failed or connection closed during handshake. Bytes: " + std::to_string(bytes) + ", WSA Error: " + std::to_string(WSAGetLastError()));
+            return false;
+        }
         read_total += bytes;
+        LogEvent("TLS: Received " + std::to_string(bytes) + " bytes from server. Total buffered: " + std::to_string(read_total));
 
         SecBuffer inBuffers[2];
         inBuffers[0].pvBuffer = read_buf.data();
@@ -147,12 +160,16 @@ bool GeminiLiveClient::DoTlsHandshake(const std::string& host) {
 
         if (status == SEC_E_OK || status == SEC_I_CONTINUE_NEEDED) {
             if (outBuf.cbBuffer != 0 && outBuf.pvBuffer != NULL) {
+                LogEvent("TLS: Sending continuation token to server (" + std::to_string(outBuf.cbBuffer) + " bytes)");
                 if (send(sock_, (char*)outBuf.pvBuffer, outBuf.cbBuffer, 0) == SOCKET_ERROR) {
+                    LogEvent("TLS: send() in loop failed with error " + std::to_string(WSAGetLastError()));
                     FreeContextBuffer(outBuf.pvBuffer);
                     return false;
                 }
                 FreeContextBuffer(outBuf.pvBuffer);
             }
+        } else {
+            LogEvent("TLS: InitializeSecurityContextA in loop failed with status " + std::to_string(status));
         }
 
         if (inBuffers[1].BufferType == SECBUFFER_EXTRA) {
@@ -163,15 +180,19 @@ bool GeminiLiveClient::DoTlsHandshake(const std::string& host) {
         }
     }
 
-    if (status != SEC_E_OK) return false;
+    if (status != SEC_E_OK) {
+        LogEvent("TLS: Handshake finished with incomplete status: " + std::to_string(status));
+        return false;
+    }
 
+    LogEvent("TLS: Handshake successful.");
     tls_established_ = true;
     QueryContextAttributes(&hCtxt_, SECPKG_ATTR_STREAM_SIZES, &streamSizes_);
     
     // Any leftover data in read_buf is the start of the HTTP response.
     // We need to move it to our decryption buffer.
     if (read_total > 0) {
-        dec_buffer_.assign(read_buf.data(), read_buf.data() + read_total);
+        m_enc_buffer.assign(read_buf.data(), read_buf.data() + read_total);
     }
 
     return true;
@@ -180,7 +201,10 @@ bool GeminiLiveClient::DoTlsHandshake(const std::string& host) {
 bool GeminiLiveClient::DoWsHandshake(const std::string& host, unsigned short port, const std::string& path, std::string& secKey) {
     BYTE keyData[16];
     HCRYPTPROV hProv;
-    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) return false;
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        LogEvent("WS: CryptAcquireContext failed.");
+        return false;
+    }
     CryptGenRandom(hProv, sizeof(keyData), keyData);
     CryptReleaseContext(hProv, 0);
 
@@ -194,14 +218,26 @@ bool GeminiLiveClient::DoWsHandshake(const std::string& host, unsigned short por
     request += "Sec-WebSocket-Version: 13\r\n";
     request += "\r\n";
 
-    if (SendTls(request.c_str(), (int)request.length()) <= 0) return false;
+    LogEvent("WS: Sending handshake request.");
+    if (SendTls(request.c_str(), (int)request.length()) <= 0) {
+        LogEvent("WS: SendTls for handshake request failed.");
+        return false;
+    }
 
     char buffer[2048];
     int bytes = RecvTls(buffer, sizeof(buffer) - 1);
-    if (bytes <= 0) { return false; }
+    if (bytes <= 0) {
+        LogEvent("WS: RecvTls for handshake response failed. Bytes: " + std::to_string(bytes));
+        return false;
+    }
     buffer[bytes] = '\0';
+    LogEvent("WS: Received handshake response:\n" + std::string(buffer));
 
-    return strstr(buffer, " 101 ") != NULL;
+    if (strstr(buffer, " 101 ") == NULL) {
+        LogEvent("WS: Handshake response is not 101 Switching Protocols.");
+        return false;
+    }
+    return true;
 }
 
 bool GeminiLiveClient::Connect(const std::string& api_key) {
@@ -330,7 +366,8 @@ void GeminiLiveClient::Close() {
         closesocket(sock_);
         sock_ = INVALID_SOCKET;
     }
-    dec_buffer_.clear();
+    m_enc_buffer.clear();
+    m_dec_buffer.clear();
 }
 
 int GeminiLiveClient::SendTls(const char* data, int len) {
@@ -360,39 +397,69 @@ int GeminiLiveClient::SendTls(const char* data, int len) {
     return len;
 }
 
-int GeminiLiveClient::RecvTls(char* buffer, int len) {
+int GeminiLiveClient::RecvTls(char* out_buffer, int out_len) {
     if (!tls_established_) return -1;
-    
-    if (!dec_buffer_.empty()) {
-        size_t to_copy = std::min((size_t)len, dec_buffer_.size());
-        memcpy(buffer, dec_buffer_.data(), to_copy);
-        dec_buffer_.erase(dec_buffer_.begin(), dec_buffer_.begin() + to_copy);
+
+    // 1. Serve any leftover decrypted data first.
+    if (!m_dec_buffer.empty()) {
+        size_t to_copy = std::min((size_t)out_len, m_dec_buffer.size());
+        memcpy(out_buffer, m_dec_buffer.data(), to_copy);
+        m_dec_buffer.erase(m_dec_buffer.begin(), m_dec_buffer.begin() + to_copy);
         return (int)to_copy;
     }
 
+    // 2. Read from socket into our encrypted buffer.
     char temp_buf[8192];
     int bytes_read = recv(sock_, temp_buf, sizeof(temp_buf), 0);
-    if (bytes_read <= 0) return bytes_read;
+    if (bytes_read < 0) {
+        if (WSAGetLastError() == WSAEWOULDBLOCK) return 0; // Not an error, try again later
+        return -1;
+    }
+    if (bytes_read == 0) {
+        return 0; // Connection closed
+    }
+    m_enc_buffer.insert(m_enc_buffer.end(), temp_buf, temp_buf + bytes_read);
 
-    dec_buffer_.assign(temp_buf, temp_buf + bytes_read);
-
-    while (true) {
+    // 3. Loop and decrypt as many records as possible from the encrypted buffer.
+    while (!m_enc_buffer.empty()) {
         SecBuffer bufs[4] = {};
-        bufs[0].pvBuffer = dec_buffer_.data();
-        bufs[0].cbBuffer = (unsigned long)dec_buffer_.size();
+        bufs[0].pvBuffer = m_enc_buffer.data();
+        bufs[0].cbBuffer = (unsigned long)m_enc_buffer.size();
         bufs[0].BufferType = SECBUFFER_DATA;
+        bufs[1].BufferType = SECBUFFER_EMPTY;
+        bufs[2].BufferType = SECBUFFER_EMPTY;
+        bufs[3].BufferType = SECBUFFER_EMPTY;
+
         SecBufferDesc desc = { SECBUFFER_VERSION, 4, bufs };
         SECURITY_STATUS status = DecryptMessage(&hCtxt_, &desc, 0, NULL);
 
-        if (status == SEC_E_INCOMPLETE_MESSAGE) break;
-        if (status != SEC_E_OK && status != SEC_I_RENEGOTIATE) return -1;
-        // Process decrypted data and handle SECBUFFER_EXTRA...
-        // For simplicity, we'll assume full messages are decrypted and just use the buffer.
-        // A full implementation is much more complex.
-        return RecvTls(buffer, len); // Recursive call to serve from buffer
+        if (status == SEC_E_OK) {
+            SecBuffer* pDataBuffer = nullptr;
+            SecBuffer* pExtraBuffer = nullptr;
+            for (int i = 0; i < 4; i++) {
+                if (bufs[i].BufferType == SECBUFFER_DATA) pDataBuffer = &bufs[i];
+                if (bufs[i].BufferType == SECBUFFER_EXTRA) pExtraBuffer = &bufs[i];
+            }
+
+            if (pDataBuffer) {
+                m_dec_buffer.insert(m_dec_buffer.end(), (char*)pDataBuffer->pvBuffer, (char*)pDataBuffer->pvBuffer + pDataBuffer->cbBuffer);
+            }
+
+            if (pExtraBuffer && pExtraBuffer->cbBuffer > 0) {
+                memmove(m_enc_buffer.data(), pExtraBuffer->pvBuffer, pExtraBuffer->cbBuffer);
+                m_enc_buffer.resize(pExtraBuffer->cbBuffer);
+            } else {
+                m_enc_buffer.clear();
+            }
+        } else if (status == SEC_E_INCOMPLETE_MESSAGE) {
+            break; // Need more data from socket.
+        } else {
+            return -1; // Decryption failed.
+        }
     }
 
-    return 0; // Incomplete message, need more data from socket.
+    // 4. After decrypting, serve from the decrypted buffer.
+    return RecvTls(out_buffer, out_len);
 }
 
 unsigned int GeminiLiveClient::RecvThreadProc(void* param) {
