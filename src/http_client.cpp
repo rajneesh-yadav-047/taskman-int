@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "config.h" // For GEMINI_API_KEY
+
 #pragma comment(lib, "winhttp.lib")
 
 // Very small URL parser for http://host:port/path
@@ -42,8 +44,12 @@ std::string http_post_json(const std::string& url, const std::string& json) {
     bool use_https = false;
     parse_url(url, host, port, path, use_https);
 
+    // Open WinHTTP session; do not force NO_PROXY here because system proxy is usually fine for remote calls
     HINTERNET hSession = WinHttpOpen(L"taskman-int/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) throw std::runtime_error("WinHttpOpen failed");
+    if (!hSession) {
+        DWORD err = GetLastError();
+        throw std::runtime_error(std::string("WinHttpOpen failed: ") + std::to_string(err));
+    }
 
     HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), port, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); throw std::runtime_error("WinHttpConnect failed"); }
@@ -51,22 +57,20 @@ std::string http_post_json(const std::string& url, const std::string& json) {
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, use_https ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); throw std::runtime_error("WinHttpOpenRequest failed"); }
 
-    // Build headers, include Authorization if TASKMAN_API_KEY is present in env
+    // Set headers. For direct-to-API calls, we may need to add an Authorization header.
     std::wstring headers = L"Content-Type: application/json";
-    const char* apiKey = getenv("TASKMAN_API_KEY");
-    if (apiKey) {
-        std::string keystr(apiKey);
-        int klen = MultiByteToWideChar(CP_UTF8, 0, keystr.c_str(), -1, NULL, 0);
+    // Keys starting with "AIza" are sent as a query parameter by the caller.
+    // Other keys (like GCP service account tokens) are sent as a Bearer token.
+    if (!GEMINI_API_KEY.empty() && GEMINI_API_KEY.rfind("AIza", 0) != 0) {
+        int klen = MultiByteToWideChar(CP_UTF8, 0, GEMINI_API_KEY.c_str(), -1, NULL, 0);
         if (klen > 0) {
             std::wstring wkey(klen, L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, keystr.c_str(), -1, &wkey[0], klen);
+            MultiByteToWideChar(CP_UTF8, 0, GEMINI_API_KEY.c_str(), -1, &wkey[0], klen);
             if (!wkey.empty() && wkey.back() == L'\0') wkey.pop_back();
-            headers += L"\r\nAuthorization: Bearer ";
-            headers += wkey;
+            headers += L"\r\nAuthorization: Bearer " + wkey;
         }
     }
 
-    // Use WinHttpAddRequestHeaders for robustness, then send body via WinHttpSendRequest.
     if (!WinHttpAddRequestHeaders(hRequest, headers.c_str(), -1L, WINHTTP_ADDREQ_FLAG_ADD)) {
         DWORD err = GetLastError();
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);

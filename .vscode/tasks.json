@@ -8,11 +8,9 @@
             "args": [
                 "-g",
                 "${workspaceFolder}\\src\\audio_capture.cpp",
-                "${workspaceFolder}\\src\\http_client.cpp",
+                "${workspaceFolder}\\src\\audio_playback.cpp",
+                "${workspaceFolder}\\src\\gemini_live_client.cpp",
                 "${workspaceFolder}\\src\\main.cpp",
-                "${workspaceFolder}\\src\\prompt_client.cpp",
-                "${workspaceFolder}\\src\\stt_ws_client.cpp",
-                "${workspaceFolder}\\src\\stt_ws_socket.cpp",
                 "-o",
                 "${workspaceFolder}\\main.exe",
                 "-lgdiplus",
@@ -20,6 +18,8 @@
                 "-luser32",
                 "-lwinhttp",
                 "-lws2_32",
+                "-lcrypt32",
+                "-lsecur32",
                 "-lwinmm",
                 "-static-libgcc",
                 "-static-libstdc++",
@@ -65,7 +65,7 @@
             "args": [
                 "-NoProfile",
                 "-Command",
-                "& 'C:/msys64/ucrt64/bin/g++.exe' -g '${workspaceFolder}\\src\\audio_capture.cpp' '${workspaceFolder}\\src\\http_client.cpp' '${workspaceFolder}\\src\\main.cpp' '${workspaceFolder}\\src\\prompt_client.cpp' '${workspaceFolder}\\src\\stt_ws_client.cpp' '${workspaceFolder}\\src\\stt_ws_socket.cpp' -o '${workspaceFolder}\\main.exe' -lgdiplus -lgdi32 -luser32 -lwinhttp -lws2_32 -static-libgcc -static-libstdc++ -mwindows; Copy-Item '${workspaceFolder}\\main.exe' '${workspaceFolder}\\taskman_int.exe' -Force; Start-Process -NoNewWindow -FilePath '${workspaceFolder}\\taskman_int.exe'"
+                "& 'C:/msys64/ucrt64/bin/g++.exe' -g '${workspaceFolder}\\src\\audio_capture.cpp' '${workspaceFolder}\\src\\audio_playback.cpp' '${workspaceFolder}\\src\\gemini_live_client.cpp' '${workspaceFolder}\\src\\main.cpp' -o '${workspaceFolder}\\main.exe' -lgdiplus -lgdi32 -luser32 -lwinhttp -lws2_32 -lwinmm -lcrypt32 -lsecur32 -static-libgcc -static-libstdc++ -mwindows; Copy-Item '${workspaceFolder}\\main.exe' '${workspaceFolder}\\taskman_int.exe' -Force; Start-Process -NoNewWindow -FilePath '${workspaceFolder}\\taskman_int.exe'"
             ],
             "group": {
                 "kind": "build",
